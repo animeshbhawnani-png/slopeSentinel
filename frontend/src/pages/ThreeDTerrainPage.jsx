@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import ThreeTerrainViewer from '../components/ThreeTerrainViewer';
 import { useActiveCase } from '../context/ActiveCaseContext';
+import { apiUrl } from '../api';
 
 export default function ThreeDTerrainPage({ onNavigate }) {
   const { activeCase } = useActiveCase();
@@ -144,7 +145,7 @@ export default function ThreeDTerrainPage({ onNavigate }) {
                   onClick={async () => {
                     if (!caseId) { alert('OBJ mesh not available. Run terrain reconstruction first.'); return; }
                     try {
-                      const res = await fetch(`/api/terrain/reconstruct/${caseId}/mesh`);
+                      const res = await fetch(apiUrl(`/api/terrain/reconstruct/${caseId}/mesh`));
                       if (!res.ok) {
                          const err = await res.json().catch(() => ({}));
                          throw new Error(err.detail || `Download failed with status ${res.status}`);

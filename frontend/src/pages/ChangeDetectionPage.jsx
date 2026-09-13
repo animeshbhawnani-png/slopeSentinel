@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useActiveCase } from '../context/ActiveCaseContext';
+import { apiUrl } from '../api';
 
 export default function ChangeDetectionPage({ onNavigate }) {
   const {
@@ -167,7 +168,7 @@ export default function ChangeDetectionPage({ onNavigate }) {
         formData.append('after_case_id', afterObservation.caseId);
       }
 
-      const response = await fetch('/api/change/analyze', {
+      const response = await fetch(apiUrl('/api/change/analyze'), {
         method: 'POST',
         body: formData
       });

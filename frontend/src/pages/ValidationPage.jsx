@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiUrl } from '../api';
 
 export default function ValidationPage({ onNavigate }) {
   const [samples, setSamples] = useState([]);
@@ -15,7 +16,7 @@ export default function ValidationPage({ onNavigate }) {
 
   // Load available GAMUS samples and aggregate summary on mount
   useEffect(() => {
-    fetch('/api/validation/samples')
+    fetch(apiUrl('/api/validation/samples'))
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -33,7 +34,7 @@ export default function ValidationPage({ onNavigate }) {
         console.warn('Could not fetch validation samples:', err);
       });
 
-    fetch('/api/validation/summary')
+    fetch(apiUrl('/api/validation/summary'))
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data) setSummaryData(data);
@@ -50,7 +51,7 @@ export default function ValidationPage({ onNavigate }) {
     setLoading(true);
     setError(null);
 
-    fetch('/api/validation/run', {
+    fetch(apiUrl('/api/validation/run'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -117,7 +118,7 @@ export default function ValidationPage({ onNavigate }) {
     formData.append('comparison_mode', comparisonMode);
     
     try {
-      const res = await fetch('/api/validation/custom', {
+      const res = await fetch(apiUrl('/api/validation/custom'), {
         method: 'POST',
         body: formData,
       });
@@ -136,7 +137,7 @@ export default function ValidationPage({ onNavigate }) {
 
   const handleRerun = () => {
     setLoading(true);
-    fetch('/api/validation/run', {
+    fetch(apiUrl('/api/validation/run'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

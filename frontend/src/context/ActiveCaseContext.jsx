@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { apiUrl } from '../api';
 
 const ActiveCaseContext = createContext(null);
 
@@ -91,7 +92,7 @@ export function ActiveCaseProvider({ children }) {
       return;
     }
 
-    fetch('/api/terrain/active')
+    fetch(apiUrl('/api/terrain/active'))
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!data || data.status !== 'success') {

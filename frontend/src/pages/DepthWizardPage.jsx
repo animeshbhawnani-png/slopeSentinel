@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import ThreeTerrainViewer from '../components/ThreeTerrainViewer';
 import { useActiveCase } from '../context/ActiveCaseContext';
+import { apiUrl } from '../api';
 
 export default function DepthWizardPage({ onNavigate }) {
   const { activeCase, setLiveReconstruction } = useActiveCase();
@@ -29,7 +30,7 @@ export default function DepthWizardPage({ onNavigate }) {
 
   // Health check on mount
   useEffect(() => {
-    fetch('/api/v1/health')
+    fetch(apiUrl('/api/v1/health'))
       .then(r => r.json())
       .catch(() => {
         console.warn('DepthWizard backend initializing...');
@@ -97,7 +98,7 @@ export default function DepthWizardPage({ onNavigate }) {
         setPipelineStage(prev => (prev === 'GENERATING TERRAIN' ? 'BUILDING 3D' : prev));
       }, 1250);
 
-      const response = await fetch('/api/terrain/reconstruct', {
+      const response = await fetch(apiUrl('/api/terrain/reconstruct'), {
         method: 'POST',
         body: formData
       });
@@ -642,7 +643,7 @@ export default function DepthWizardPage({ onNavigate }) {
                     <button
                       onClick={async () => {
                         try {
-                          const res = await fetch(resultData.depth_array);
+                          const res = await fetch(apiUrl(resultData.depth_array));
                           if (!res.ok) throw new Error(`Failed to download`);
                           const blob = await res.blob();
                           if (blob.size === 0) throw new Error("File empty");
