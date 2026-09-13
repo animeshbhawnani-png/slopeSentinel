@@ -4,6 +4,7 @@ import time
 import math
 import uuid
 import logging
+import threading
 from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
@@ -16,14 +17,34 @@ from transformers import pipeline as hf_pipeline
 logger = logging.getLogger("depthwizard")
 logger.setLevel(logging.INFO)
 
+INFERENCE_MAX_DIM = 448
+CPU_THREADS = 1
+
+try:
+    torch.set_num_threads(CPU_THREADS)
+except RuntimeError as exc:
+    logger.warning("Could not set PyTorch intra-op threads: %s", exc)
+
+try:
+    torch.set_num_interop_threads(CPU_THREADS)
+except RuntimeError as exc:
+    logger.debug("PyTorch inter-op threads already initialized: %s", exc)
+
+logger.info(
+    "PyTorch CPU threading configured: intra_op=%d, inter_op=%d",
+    torch.get_num_threads(),
+    torch.get_num_interop_threads(),
+)
+
 
 # ---------------------------------------------------------------------------
 # Global singleton cache for Depth Anything V2
 # ---------------------------------------------------------------------------
 
 _DEPTH_ANYTHING_PIPELINE = None
+_MODEL_INIT_LOCK = threading.Lock()
 _MODEL_NAME = "depth-anything/Depth-Anything-V2-Small-hf"
-_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_DEVICE = "cpu"
 _MODEL_LOAD_TIME_S = 0.0
 
 
@@ -34,32 +55,36 @@ def load_depth_anything_model():
     global _DEPTH_ANYTHING_PIPELINE, _MODEL_LOAD_TIME_S
 
     if _DEPTH_ANYTHING_PIPELINE is None:
-        logger.info(
-            "Loading Depth Anything V2 model (%s) on device: %s...",
-            _MODEL_NAME,
-            _DEVICE,
-        )
-
-        t0 = time.time()
-
-        try:
-            _DEPTH_ANYTHING_PIPELINE = hf_pipeline(
-                task="depth-estimation",
-                model=_MODEL_NAME,
-                device=_DEVICE,
-            )
-
-            _MODEL_LOAD_TIME_S = round(time.time() - t0, 3)
+        with _MODEL_INIT_LOCK:
+            if _DEPTH_ANYTHING_PIPELINE is not None:
+                return _DEPTH_ANYTHING_PIPELINE
 
             logger.info(
-                "Depth Anything V2 loaded successfully in %.3fs on %s",
-                _MODEL_LOAD_TIME_S,
+                "Loading Depth Anything V2 model (%s) on device: %s...",
+                _MODEL_NAME,
                 _DEVICE,
             )
 
-        except Exception as e:
-            logger.error("Failed to load Depth Anything V2: %s", e)
-            raise
+            t0 = time.time()
+
+            try:
+                _DEPTH_ANYTHING_PIPELINE = hf_pipeline(
+                    task="depth-estimation",
+                    model=_MODEL_NAME,
+                    device=_DEVICE,
+                )
+
+                _MODEL_LOAD_TIME_S = round(time.time() - t0, 3)
+
+                logger.info(
+                    "Depth Anything V2 loaded successfully in %.3fs on %s",
+                    _MODEL_LOAD_TIME_S,
+                    _DEVICE,
+                )
+
+            except Exception as e:
+                logger.error("Failed to load Depth Anything V2: %s", e)
+                raise
 
     return _DEPTH_ANYTHING_PIPELINE
 
@@ -90,9 +115,6 @@ class DepthWizardPipeline:
     def __init__(self):
         self.model_name = "Depth Anything V2 (Small-hf)"
         self.device = _DEVICE
-
-        # Ensure model is initialized.
-        load_depth_anything_model()
 
     # -----------------------------------------------------------------------
     # Stage 1: Input validation
@@ -137,7 +159,7 @@ class DepthWizardPipeline:
     def preprocess(
         self,
         image: Image.Image,
-        max_dim: int = 1024,
+        max_dim: int = INFERENCE_MAX_DIM,
     ) -> Tuple[Image.Image, Dict[str, Any]]:
         """
         Preserves aspect ratio while constraining processing resolution.
@@ -162,13 +184,11 @@ class DepthWizardPipeline:
             Image.Resampling.BICUBIC,
         )
 
-        img_np = np.array(processed_img, dtype=np.float32) / 255.0
-
-        luminance = (
-            0.2989 * img_np[:, :, 0]
-            + 0.5870 * img_np[:, :, 1]
-            + 0.1140 * img_np[:, :, 2]
+        luminance = np.asarray(
+            processed_img.convert("L"),
+            dtype=np.float32,
         )
+        luminance *= 1.0 / 255.0
 
         # These remain diagnostic heuristics only.
         shadow_mask = luminance < 0.10
@@ -181,13 +201,16 @@ class DepthWizardPipeline:
 
         low_texture_mask = lum_grad < 0.02
         low_texture_ratio = float(np.mean(low_texture_mask))
+        mean_luminance = float(np.mean(luminance))
+        contrast_std = float(np.std(luminance))
+        del shadow_mask, lum_grad, low_texture_mask, luminance
 
         metadata = {
             "original_resolution": [orig_w, orig_h],
             "inference_resolution": [new_w, new_h],
             "aspect_ratio_preserved": True,
-            "mean_luminance": float(np.mean(luminance)),
-            "contrast_std": float(np.std(luminance)),
+            "mean_luminance": mean_luminance,
+            "contrast_std": contrast_std,
             "heuristic_indicators": {
                 "shadow_mask_ratio": round(shadow_ratio, 4),
                 "low_texture_ratio": round(low_texture_ratio, 4),
@@ -219,7 +242,7 @@ class DepthWizardPipeline:
 
         t0 = time.time()
 
-        with torch.no_grad():
+        with torch.inference_mode():
             result = pipe(pil_image)
 
         t_infer = time.time() - t0
@@ -253,6 +276,10 @@ class DepthWizardPipeline:
             raise RuntimeError(
                 "Unexpected output structure from Depth Anything V2 pipeline."
             )
+
+        del result
+        if "raw_depth" in locals():
+            del raw_depth
 
         depth_arr = np.squeeze(depth_arr)
 
@@ -291,6 +318,8 @@ class DepthWizardPipeline:
             posinf=p99,
             neginf=p01,
         )
+        finite_fraction = float(np.mean(finite_mask))
+        del finite_values, finite_mask, depth_arr
 
         # -------------------------------------------------------------------
         # Robust normalization.
@@ -311,11 +340,10 @@ class DepthWizardPipeline:
         high = float(np.percentile(cleaned_depth, 99.5))
 
         if high > low:
-            normalized_depth = np.clip(
-                (cleaned_depth - low) / (high - low),
-                0.0,
-                1.0,
-            )
+            np.subtract(cleaned_depth, low, out=cleaned_depth)
+            cleaned_depth /= high - low
+            np.clip(cleaned_depth, 0.0, 1.0, out=cleaned_depth)
+            normalized_depth = cleaned_depth
         else:
             normalized_depth = np.full_like(
                 cleaned_depth,
@@ -333,7 +361,7 @@ class DepthWizardPipeline:
             "raw_p50": p50,
             "raw_p95": p95,
             "raw_p99": p99,
-            "finite_fraction": float(np.mean(finite_mask)),
+            "finite_fraction": finite_fraction,
             "normalization_low": low,
             "normalization_high": high,
         }
@@ -370,9 +398,10 @@ class DepthWizardPipeline:
         # structures.
         # """
 
-        source = np.asarray(
+        source = np.array(
             normalized_depth,
             dtype=np.float32,
+            copy=True,
         )
 
         source = np.nan_to_num(
@@ -380,13 +409,10 @@ class DepthWizardPipeline:
             nan=0.5,
             posinf=1.0,
             neginf=0.0,
+            copy=False,
         )
 
-        source = np.clip(
-            source,
-            0.0,
-            1.0,
-        )
+        np.clip(source, 0.0, 1.0, out=source)
 
         # ------------------------------------------------------------
         # 1. Robust local surface
@@ -398,11 +424,12 @@ class DepthWizardPipeline:
         if median_size % 2 == 0:
             median_size += 1
 
-        median_surface = ndimage.median_filter(
+        terrain_base = ndimage.median_filter(
             source,
             size=median_size,
             mode="nearest",
         )
+        terrain_base *= 0.20
 
         # ------------------------------------------------------------
         # 2. Multi-scale low-frequency terrain estimates
@@ -413,47 +440,37 @@ class DepthWizardPipeline:
             sigma=max(1.5, gaussian_sigma * 0.5),
             mode="nearest",
         )
+        terrain_base += 0.25 * small_scale
+        del small_scale
 
         medium_scale = ndimage.gaussian_filter(
             source,
             sigma=max(2.5, gaussian_sigma),
             mode="nearest",
         )
+        terrain_base += 0.25 * medium_scale
+        del medium_scale
 
         broad_scale = ndimage.gaussian_filter(
             source,
             sigma=max(4.0, gaussian_sigma * 2.0),
             mode="nearest",
         )
-
-        # Broad terrain gets the strongest influence.
-        terrain_base = (
-            0.20 * median_surface
-            + 0.25 * small_scale
-            + 0.25 * medium_scale
-            + 0.30 * broad_scale
-        )
+        terrain_base += 0.30 * broad_scale
 
         # ------------------------------------------------------------
         # 3. Detect narrow object-scale deviations
         # ------------------------------------------------------------
 
-        residual = (
-            source - terrain_base
-        )
+        residual = source - terrain_base
+        np.abs(residual, out=residual)
 
-        abs_residual = np.abs(
-            residual
-        )
-
-        residual_median = float(
-            np.median(abs_residual)
-        )
+        residual_median = float(np.median(residual))
 
         residual_mad = float(
             np.median(
                 np.abs(
-                    abs_residual
+                    residual
                     - residual_median
                 )
             )
@@ -469,21 +486,16 @@ class DepthWizardPipeline:
             absolute_threshold,
         )
 
-        strong_outlier_mask = (
-            abs_residual > threshold
-        )
+        strong_outlier_mask = residual > threshold
+        del residual
 
         # ------------------------------------------------------------
         # 4. Replace strong deviations with terrain base
         # ------------------------------------------------------------
 
         filtered = source.copy()
-
-        filtered[
-            strong_outlier_mask
-        ] = terrain_base[
-            strong_outlier_mask
-        ]
+        filtered[strong_outlier_mask] = terrain_base[strong_outlier_mask]
+        del source
 
         # ------------------------------------------------------------
         # 5. Morphological opening/closing
@@ -522,6 +534,7 @@ class DepthWizardPipeline:
             0.80 * filtered
             + 0.20 * broad_scale
         )
+        del broad_scale, terrain_base
 
         # ------------------------------------------------------------
         # 8. Limit extreme local slopes
@@ -554,6 +567,7 @@ class DepthWizardPipeline:
             filtered,
             local_max + max_local_deviation,
         )
+        del local_min, local_max
 
         # ------------------------------------------------------------
         # 9. Final low-pass pass
@@ -605,6 +619,9 @@ class DepthWizardPipeline:
         filtered = filtered.astype(
             np.float32
         )
+        outlier_fraction = float(np.mean(strong_outlier_mask))
+        outlier_pixels_replaced = int(np.count_nonzero(strong_outlier_mask))
+        del strong_outlier_mask
 
         filter_metadata = {
             "method": (
@@ -628,16 +645,12 @@ class DepthWizardPipeline:
             ),
             "outlier_fraction": round(
                 float(
-                    np.mean(
-                        strong_outlier_mask
-                    )
+                    outlier_fraction
                 ),
                 6,
             ),
             "outlier_pixels_replaced": int(
-                np.count_nonzero(
-                    strong_outlier_mask
-                )
+                outlier_pixels_replaced
             ),
             "surface_range": [
                 round(
@@ -1542,6 +1555,7 @@ class DepthWizardPipeline:
         ) = self.estimate_depth(
             preprocessed_image
         )
+        del decoded_image, preprocessed_image
 
         # -------------------------------------------------------------------
         # 4. Save raw depth visualization.
@@ -1594,6 +1608,7 @@ class DepthWizardPipeline:
         ) = self.filter_terrain_surface(
             raw_normalized_depth
         )
+        del raw_normalized_depth
 
         filtered_depth_png_filename = (
             f"{filename_prefix}_terrain_surface.png"
@@ -1640,6 +1655,7 @@ class DepthWizardPipeline:
             reference_elevation=reference_elevation,
             calibration_mode=calibration_mode,
         )
+        del filtered_terrain
 
         # -------------------------------------------------------------------
         # 6.5 Calculate Terrain Steepness (Prototype Indicator)

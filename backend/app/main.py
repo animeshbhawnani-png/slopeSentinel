@@ -3,6 +3,7 @@ import json
 import uuid
 import glob
 import logging
+import threading
 from typing import Optional, Dict
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status
@@ -57,6 +58,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # In-memory and disk registry for persistent reconstructions
 ACTIVE_RECONSTRUCTIONS: Dict[str, dict] = {}
 LATEST_RECONSTRUCTION_ID: Optional[str] = None
+RECONSTRUCTION_LOCK = threading.Lock()
 
 # Preload existing saved reconstructions from disk on startup
 try:
@@ -71,7 +73,7 @@ try:
 except Exception as e:
     logger.warning("Could not reload past reconstructions from disk: %s", e)
 
-# Initialize pipeline once on startup
+# Create the singleton pipeline wrapper without loading model weights.
 logger.info("Initializing DepthWizard pipeline singleton...")
 pipeline = get_depthwizard_pipeline()
 
@@ -166,14 +168,24 @@ async def reconstruct_terrain(
         logger.warning("Could not persist original upload to disk: %s", e)
 
     # Execute DepthWizard Pipeline with graceful failure handling
-    try:
-        result = pipeline.run(
-            image_bytes=image_bytes,
-            static_dir=STATIC_DIR,
-            reference_elevation=reference_elevation,
-            calibration_mode=calibration_mode or "relative",
-            filename_prefix=f"recon_{req_uuid}"
+    if not RECONSTRUCTION_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Another terrain reconstruction is already in progress. Please retry shortly.",
         )
+
+    try:
+        try:
+            result = pipeline.run(
+                image_bytes=image_bytes,
+                static_dir=STATIC_DIR,
+                reference_elevation=reference_elevation,
+                calibration_mode=calibration_mode or "relative",
+                filename_prefix=f"recon_{req_uuid}"
+            )
+        finally:
+            RECONSTRUCTION_LOCK.release()
+
         result["source_image"] = f"/static/uploads/{safe_name}"
         result["input_image"] = f"/static/uploads/{safe_name}"
         result["metadata"]["original_filename"] = filename
