@@ -1,0 +1,54 @@
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Python caches / tests
+.pytest_cache/
+.mypy_cache/
+
+# Generated local files
+uploads/
+outputs/
+cache/
+caches/
+tmp/
+temp/
+
+# Generated numerical artifacts
+*.npy
+*.npz
+
+# Generated model artifacts
+*.pt
+*.pth
+*.ckpt
+
+# Local generated meshes
+*.obj
+
+# Local benchmark caches
+cache_*.json
