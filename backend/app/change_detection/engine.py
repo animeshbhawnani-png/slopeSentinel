@@ -238,18 +238,28 @@ class TemporalChangeEngine:
 
         return regions
 
-    def _extract_url(self, r):
+    def _extract_artifact_url(self, r):
+        if not r:
+            raise ValueError("HF DepthWizard did not return a valid depth artifact.")
+        url = None
         if isinstance(r, dict):
-            return r.get("url") or r.get("path")
-        if isinstance(r, str):
-            return r
-        return getattr(r, "name", str(r))
+            url = r.get("url") or r.get("path")
+        elif isinstance(r, str):
+            url = r
+        else:
+            url = getattr(r, "name", str(r))
+        
+        if not url or url == "None":
+            raise ValueError("HF DepthWizard did not return a valid depth artifact.")
+        return url
 
     def _download_hf_artifact(self, url: str, dest_path: str, timeout: float = 120.0, max_retries: int = 3) -> bool:
         if not url.startswith("http://") and not url.startswith("https://"):
             import shutil
             shutil.copy2(url, dest_path)
-            return True
+            if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                return True
+            return False
 
         for attempt in range(max_retries):
             try:
@@ -259,8 +269,12 @@ class TemporalChangeEngine:
                     with open(tmp_path, "wb") as f:
                         for chunk in response.iter_bytes(chunk_size=8192):
                             f.write(chunk)
-                os.replace(tmp_path, dest_path)
-                return True
+                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                    os.replace(tmp_path, dest_path)
+                    return True
+                else:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
             except Exception as e:
                 logger.warning(f"Download attempt {attempt+1} failed: {e}")
                 if os.path.exists(dest_path + ".tmp"):
@@ -297,15 +311,20 @@ class TemporalChangeEngine:
             if not isinstance(hf_result, (list, tuple)) or len(hf_result) < 5:
                 raise ValueError("Invalid response format from HF Space.")
 
-            depth_url = self._extract_url(hf_result[1])
-            if not depth_url:
-                raise ValueError("No relative depth artifact returned from HF Space.")
+            depth_url = self._extract_artifact_url(hf_result[1])
 
             depth_dest = os.path.join(tmpdir, "depth.npy")
             if not self._download_hf_artifact(depth_url, depth_dest):
                 raise ValueError(f"Failed to download Depth artifact from {depth_url}")
 
-            depth_arr = np.load(depth_dest, allow_pickle=False).astype(np.float32)
+            if not os.path.exists(depth_dest) or os.path.getsize(depth_dest) == 0:
+                raise ValueError(f"Downloaded depth artifact is missing or empty.")
+
+            try:
+                depth_arr = np.load(depth_dest, allow_pickle=False).astype(np.float32)
+            except Exception as e:
+                raise ValueError(f"Failed to load depth array: {e}")
+
             if depth_arr.ndim != 2 or depth_arr.size == 0:
                 raise ValueError("Invalid depth array returned from HF.")
             

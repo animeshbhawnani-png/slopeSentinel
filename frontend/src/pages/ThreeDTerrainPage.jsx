@@ -7,10 +7,13 @@ export default function ThreeDTerrainPage({ onNavigate }) {
   const { activeCase } = useActiveCase();
   const recon = activeCase?.reconstruction;
 
-  // Active mesh URL: live reconstruction mesh from DepthWizard
-  const meshUrl = recon?.mesh_output || recon?.mesh || null;
-  const textureUrl = recon?.source_image || recon?.input_image || null;
-  const dsmUrl = recon?.dsm_output || recon?.dsm || null;
+  const meshPath = recon?.mesh_output || recon?.mesh || null;
+  const texturePath = recon?.source_image || recon?.input_image || null;
+  const dsmPath = recon?.dsm_output || recon?.dsm || null;
+
+  const meshUrl = meshPath ? apiUrl(meshPath) : null;
+  const textureUrl = texturePath ? apiUrl(texturePath) : null;
+  const dsmUrl = dsmPath ? apiUrl(dsmPath) : null;
   const isLive = Boolean(recon);
   const caseId = activeCase?.active_case_id || (recon?.case_id ? recon.case_id : 'LIVE-MESH');
   const vertexCount = recon?.metadata?.mesh?.vertex_count || 0;
@@ -139,37 +142,49 @@ export default function ThreeDTerrainPage({ onNavigate }) {
               </div>
             </div>
 
+            {recon?.depth_map && (
+              <div className="pt-2 flex flex-col gap-2 border-t border-outline-variant/20 mt-1">
+                <span className="font-label-sm text-[10px] text-outline uppercase">Relative Depth Preview</span>
+                <img src={apiUrl(recon.depth_map)} alt="Depth Map" className="w-full h-auto rounded border border-outline-variant/30" />
+                
+                <a href={apiUrl(recon.depth_map)} download className="w-full py-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold rounded flex items-center justify-center gap-1.5 transition-colors border border-outline-variant/40 cursor-pointer">
+                  <span className="material-symbols-outlined text-[14px]">download</span>
+                  <span>Download Depth PNG</span>
+                </a>
+                
+                {recon?.depth_array && (
+                  <a href={apiUrl(recon.depth_array)} download className="w-full py-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold rounded flex items-center justify-center gap-1.5 transition-colors border border-outline-variant/40 cursor-pointer">
+                    <span className="material-symbols-outlined text-[14px]">download</span>
+                    <span>Download Depth Array (.NPY)</span>
+                  </a>
+                )}
+                
+                {(recon?.dsm_output || recon?.dsm) && (
+                  <a href={apiUrl(recon.dsm_output || recon.dsm)} download className="w-full py-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold rounded flex items-center justify-center gap-1.5 transition-colors border border-outline-variant/40 cursor-pointer">
+                    <span className="material-symbols-outlined text-[14px]">download</span>
+                    <span>Download DSM</span>
+                  </a>
+                )}
+                
+                {recon?.heightmap_output && (
+                  <a href={apiUrl(recon.heightmap_output)} download className="w-full py-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold rounded flex items-center justify-center gap-1.5 transition-colors border border-outline-variant/40 cursor-pointer">
+                    <span className="material-symbols-outlined text-[14px]">download</span>
+                    <span>Download Heightmap</span>
+                  </a>
+                )}
+              </div>
+            )}
+
             {meshUrl && (
               <div className="pt-2 flex flex-col gap-2">
-                <button
-                  onClick={async () => {
-                    if (!caseId) { alert('OBJ mesh not available. Run terrain reconstruction first.'); return; }
-                    try {
-                      const res = await fetch(apiUrl(`/api/terrain/reconstruct/${caseId}/mesh`));
-                      if (!res.ok) {
-                         const err = await res.json().catch(() => ({}));
-                         throw new Error(err.detail || `Download failed with status ${res.status}`);
-                      }
-                      const blob = await res.blob();
-                      if (blob.size === 0) throw new Error("Downloaded file is empty (0 bytes).");
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement('a');
-                      a.href = url;
-                      a.download = `${caseId}_mesh.obj`;
-                      document.body.appendChild(a);
-                      a.click();
-                      document.body.removeChild(a);
-                      URL.revokeObjectURL(url);
-                    } catch (e) {
-                      console.error(e);
-                      alert('OBJ mesh not available. Run terrain reconstruction first.\n' + e.message);
-                    }
-                  }}
+                <a
+                  href={meshUrl}
+                  download
                   className="w-full py-2 px-3 bg-secondary-container hover:bg-secondary-container/90 text-primary font-label-md text-label-md font-semibold rounded flex items-center justify-center gap-1.5 transition-colors border border-primary/30 cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-[16px]">download</span>
                   <span>Download .OBJ Mesh</span>
-                </button>
+                </a>
               </div>
             )}
           </div>
@@ -226,7 +241,7 @@ export default function ThreeDTerrainPage({ onNavigate }) {
                   <span className="font-label-sm text-label-sm text-on-surface-variant">Confidence Metric</span>
                 </div>
                 <span className="font-label-md text-label-md text-tertiary font-semibold" title="Confidence not quantified for this prototype">
-                  null (Prototype)
+                  NOT QUANTIFIED
                 </span>
               </div>
             </div>

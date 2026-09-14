@@ -14,7 +14,7 @@ export default function DepthWizardPage({ onNavigate }) {
   
   // Calibration Mode: "relative" | "calibrated"
   const [calibrationMode, setCalibrationMode] = useState('relative');
-  const [referenceElevation, setReferenceElevation] = useState('2084.5');
+  const [referenceElevation, setReferenceElevation] = useState('');
 
   // Custom file upload state
   const [customFile, setCustomFile] = useState(null);
@@ -368,7 +368,7 @@ export default function DepthWizardPage({ onNavigate }) {
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex flex-col">
                     <span className="font-label-md text-label-md text-on-surface font-semibold uppercase">Baseline Satellite Pass</span>
-                    <span className="font-label-sm text-[11px] text-secondary">June 2026 • Nainital Pilot Sector</span>
+                    <span className="font-label-sm text-[11px] text-secondary">Awaiting upload</span>
                   </div>
                   <span className="inline-flex items-center gap-1 font-label-sm text-[10px] text-primary bg-secondary-container/60 px-2 py-0.5 rounded">
                     <span className="material-symbols-outlined text-[12px]">check_circle</span>
@@ -388,7 +388,7 @@ export default function DepthWizardPage({ onNavigate }) {
                   </div>
                 </div>
                 <div className="flex items-center justify-between font-label-sm text-[11px] text-on-surface-variant bg-surface-container-lowest/50 px-2 py-1 rounded">
-                  <span className="truncate">Himalayan_Sector_Baseline.tif</span>
+                  <span className="truncate">No File Selected</span>
                   <span className="text-tertiary-fixed-dim whitespace-nowrap pl-2">Orthophoto Reference</span>
                 </div>
               </div>
@@ -490,13 +490,6 @@ export default function DepthWizardPage({ onNavigate }) {
                 <div className="flex flex-col gap-1 pt-1 border-t border-outline-variant/30">
                   <div className="flex items-center justify-between">
                     <label className="font-label-sm text-[10px] text-on-surface-variant">Ground Reference Elevation (m):</label>
-                    <button
-                      type="button"
-                      onClick={() => setReferenceElevation('2084.5')}
-                      className="font-label-sm text-[9px] text-primary hover:underline"
-                    >
-                      Nainital (2084.5m)
-                    </button>
                   </div>
                   <input
                     type="number"
