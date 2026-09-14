@@ -21,7 +21,6 @@ from fastapi.responses import JSONResponse, FileResponse
 
 from pydantic import BaseModel
 
-from app.depthwizard.pipeline import get_depthwizard_pipeline
 from app.change_detection.engine import get_change_engine
 from app.validation.benchmark import list_gamus_samples, evaluate_gamus_sample, get_aggregate_benchmark_summary, evaluate_custom_sample
 
@@ -156,7 +155,7 @@ def read_root():
         "system": "SlopeSentinel DepthWizard Engine (Proxy)",
         "model": "Depth Anything V2 (via HF Space)",
         "device": "ZeroGPU (Remote)",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "endpoints": {
             "reconstruct": "POST /api/terrain/reconstruct",
             "health": "GET /api/v1/health"
@@ -170,7 +169,7 @@ def health_check():
         "status": "healthy",
         "model": "Depth Anything V2 (via HF Space)",
         "device": "ZeroGPU (Remote)",
-        "pipeline_version": "DepthWizard Engine v2.0 (Proxy)",
+        "pipeline_version": "DepthWizard Engine v2.1 (Proxy)",
         "static_dir_ready": os.path.exists(STATIC_DIR),
     }
 
@@ -265,60 +264,346 @@ async def reconstruct_terrain(
                 api_name="/reconstruct"
             )
             
-            # The result is expected to be a tuple of 5 items:
-            # DSM, Relative Depth, Heightmap, OBJ, Metadata
-            if not isinstance(hf_result, (list, tuple)) or len(hf_result) < 5:
-                raise ValueError("Invalid response format from Hugging Face Space.")
-                
-            dsm_res = hf_result[0]
-            depth_res = hf_result[1]
-            hm_res = hf_result[2]
-            obj_res = hf_result[3]
-            meta_str = hf_result[4]
+            # Stable Hugging Face output contract:
+
             
-            # Extract file urls from Gradio's return structures
+            # 0 = DSM image
+
+            
+            # 1 = Relative Depth visualization
+
+            
+            # 2 = Heightmap image
+
+            
+            # 3 = OBJ mesh
+
+            
+            # 4 = Metadata
+
+            
+            # 5 = Raw Relative Depth .npy
+
+            
+            if not isinstance(hf_result, (list, tuple)) or len(hf_result) < 6:
+
+            
+                raise ValueError(
+
+            
+                    f"Hugging Face DepthWizard returned {len(hf_result) if isinstance(hf_result, (list, tuple)) else 0} outputs; "
+
+            
+                    "6 outputs are required."
+
+            
+                )
+
+
+            
+            dsm_res = hf_result[0]
+
+            
+            depth_visual_res = hf_result[1]
+
+            
+            hm_res = hf_result[2]
+
+            
+            obj_res = hf_result[3]
+
+            
+            meta_str = hf_result[4]
+
+            
+            raw_depth_res = hf_result[5]
+
+
+            
+            logger.info(
+
+            
+                "HF output types: DSM=%s DepthVisual=%s Heightmap=%s Mesh=%s Metadata=%s RawDepth=%s",
+
+            
+                type(dsm_res).__name__,
+
+            
+                type(depth_visual_res).__name__,
+
+            
+                type(hm_res).__name__,
+
+            
+                type(obj_res).__name__,
+
+            
+                type(meta_str).__name__,
+
+            
+                type(raw_depth_res).__name__,
+
+            
+            )
+
+
+            
             def get_url(r):
+
+            
+                if not r:
+
+            
+                    return None
+
+            
                 if isinstance(r, dict):
+
+            
                     return r.get("url") or r.get("path")
+
+            
                 if isinstance(r, str):
+
+            
                     return r
-                return getattr(r, "name", str(r))
-                
+
+            
+                return getattr(r, "name", None)
+
+
+            
             dsm_url = get_url(dsm_res)
-            depth_url = get_url(depth_res)
+
+            
+            depth_visual_url = get_url(depth_visual_res)
+
+            
             hm_url = get_url(hm_res)
+
+            
             obj_url = get_url(obj_res)
+
+            
+            raw_depth_url = get_url(raw_depth_res)
+
+
+            
+            if not raw_depth_url:
+
+            
+                raise ValueError("HF DepthWizard did not return a raw depth array.")
+
+            
+            if not dsm_url:
+
+            
+                raise ValueError("HF DepthWizard did not return a DSM artifact.")
+
+            
+            if not hm_url:
+
+            
+                raise ValueError("HF DepthWizard did not return a heightmap artifact.")
+
+            
+            if not obj_url:
+
+            
+                raise ValueError("HF DepthWizard did not return a terrain mesh.")
+
             
             # Download files to local static outputs dir
+
+
+            
             dsm_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_dsm.png")
+
+
+            
+            depth_visual_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_depth_source.png")
+
+
+            
             depth_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_depth.npy")
+
+
+            
             depth_png_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_depth.png")
+
+
+            
             hm_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_heightmap.png")
+
+
+            
             obj_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_terrain.obj")
+
+
+
             
-            if dsm_url:
-                if not download_hf_artifact(dsm_url, dsm_dest, timeout=60.0):
-                    raise ValueError(f"Failed to download DSM artifact from {dsm_url}")
+            if not download_hf_artifact(dsm_url, dsm_dest, timeout=120.0):
+
+
             
-            if depth_url:
-                if not download_hf_artifact(depth_url, depth_dest, timeout=120.0):
-                    logger.warning(f"Failed to download Depth artifact from {depth_url}")
-                else:
-                    # Generate visual PNG from downloaded NPY
-                    try:
-                        arr = np.load(depth_dest)
-                        img = render_depth_colormap_local(arr)
-                        img.save(depth_png_dest, format="PNG")
-                    except Exception as e:
-                        logger.warning(f"Failed to render visual depth map: {e}")
+                raise ValueError("Failed to download DSM artifact.")
+
+
+
             
-            if hm_url:
-                if not download_hf_artifact(hm_url, hm_dest, timeout=60.0):
-                    logger.warning(f"Failed to download Heightmap artifact from {hm_url}")
+            if depth_visual_url:
+
+
             
-            if obj_url:
-                if not download_hf_artifact(obj_url, obj_dest, timeout=180.0):
-                    raise ValueError(f"Failed to download OBJ mesh artifact from {obj_url}")
+                if not download_hf_artifact(depth_visual_url, depth_visual_dest, timeout=120.0):
+
+
+            
+                    logger.warning("Could not download HF depth visualization.")
+
+
+
+            
+            if not download_hf_artifact(hm_url, hm_dest, timeout=120.0):
+
+
+            
+                raise ValueError("Failed to download heightmap artifact.")
+
+
+
+            
+            if not download_hf_artifact(obj_url, obj_dest, timeout=180.0):
+
+
+            
+                raise ValueError("Failed to download OBJ mesh artifact.")
+
+
+
+            
+            # Output #5 is the authoritative raw relative-depth .npy.
+
+
+            
+            if not download_hf_artifact(raw_depth_url, depth_dest, timeout=120.0):
+
+
+            
+                raise ValueError("Failed to download raw depth NPY artifact.")
+
+
+
+            
+            try:
+
+
+            
+                arr = np.load(depth_dest, allow_pickle=False).astype(np.float32)
+
+
+            
+            except Exception as exc:
+
+
+            
+                raise ValueError(
+
+
+            
+                    f"Downloaded raw depth artifact is not a valid NPY file: {exc}"
+
+
+            
+                )
+
+
+
+            
+            if arr.ndim != 2 or arr.size == 0:
+
+
+            
+                raise ValueError(
+
+
+            
+                    f"Downloaded raw depth artifact has invalid shape: {arr.shape}"
+
+
+            
+                )
+
+
+
+            
+            if not np.any(np.isfinite(arr)):
+
+
+            
+                raise ValueError(
+
+
+            
+                    "Downloaded raw depth artifact contains no finite values."
+
+
+            
+                )
+
+
+
+            
+            try:
+
+
+            
+                img = render_depth_colormap_local(arr)
+
+
+            
+                img.save(depth_png_dest, format="PNG")
+
+
+            
+            except Exception as exc:
+
+
+            
+                logger.warning(
+
+
+            
+                    "Failed to render local depth visualization: %s",
+
+
+            
+                    exc,
+
+
+            
+                )
+
+
+            
+                if (
+
+
+            
+                    not os.path.exists(depth_png_dest)
+
+
+            
+                    and os.path.exists(depth_visual_dest)
+
+
+            
+                ):
+
+
+            
+                    shutil.copy2(depth_visual_dest, depth_png_dest)
+
             
             # Parse metadata
             metadata = ast.literal_eval(meta_str) if isinstance(meta_str, str) else meta_str
@@ -334,6 +619,7 @@ async def reconstruct_terrain(
                 "dsm_output": f"/static/outputs/recon_{req_uuid}_dsm.png",
                 "dsm": f"/static/outputs/recon_{req_uuid}_dsm.png",
                 "depth_map": f"/static/outputs/recon_{req_uuid}_depth.png",
+                "depth_visualization": f"/static/outputs/recon_{req_uuid}_depth.png",
                 "depth_array": f"/static/outputs/recon_{req_uuid}_depth.npy",
                 "heightmap_output": f"/static/outputs/recon_{req_uuid}_heightmap.png",
                 "mesh_output": f"/static/outputs/recon_{req_uuid}_terrain.obj",
@@ -498,6 +784,118 @@ def get_reconstruction_dsm(case_id: str):
         path=dsm_disk_path,
         media_type="image/png",
         filename=f"{case_id}_dsm.png"
+    )
+
+
+@app.get("/api/terrain/reconstruct/{case_id}/depth")
+def get_reconstruction_depth(case_id: str):
+    """
+    Serves the generated relative-depth visualization PNG.
+    """
+    recon = ACTIVE_RECONSTRUCTIONS.get(case_id)
+    if not recon:
+        json_path = os.path.join(OUTPUTS_DIR, f"{case_id}.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                recon = json.load(f)
+
+    if not recon:
+        raise HTTPException(status_code=404, detail=f"Reconstruction case '{case_id}' not found.")
+
+    depth_rel = recon.get("depth_map") or recon.get("depth_visualization")
+    if not depth_rel:
+        raise HTTPException(status_code=404, detail="Depth visualization path not found.")
+
+    disk_path = os.path.join(
+        STATIC_DIR,
+        depth_rel.replace("/static/", "").replace("/", os.sep),
+    )
+
+    if not os.path.exists(disk_path):
+        raise HTTPException(status_code=404, detail="Depth visualization file does not exist on disk.")
+
+    return FileResponse(
+        path=disk_path,
+        media_type="image/png",
+        filename=f"{case_id}_depth.png",
+    )
+
+
+@app.get("/api/terrain/reconstruct/{case_id}/depth-array")
+def get_reconstruction_depth_array(case_id: str):
+    """
+    Serves the raw numerical relative-depth NumPy array.
+    """
+    recon = ACTIVE_RECONSTRUCTIONS.get(case_id)
+    if not recon:
+        json_path = os.path.join(OUTPUTS_DIR, f"{case_id}.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                recon = json.load(f)
+
+    if not recon:
+        raise HTTPException(status_code=404, detail=f"Reconstruction case '{case_id}' not found.")
+
+    depth_rel = recon.get("depth_array")
+    if not depth_rel:
+        raise HTTPException(status_code=404, detail="Raw depth array path not found.")
+
+    disk_path = os.path.join(
+        STATIC_DIR,
+        depth_rel.replace("/static/", "").replace("/", os.sep),
+    )
+
+    if not os.path.exists(disk_path):
+        raise HTTPException(status_code=404, detail="Raw depth array file does not exist on disk.")
+
+    try:
+        arr = np.load(disk_path, allow_pickle=False)
+        if arr.ndim != 2 or arr.size == 0 or not np.any(np.isfinite(arr)):
+            raise ValueError("Invalid raw depth array.")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Raw depth array is invalid: {exc}")
+
+    return FileResponse(
+        path=disk_path,
+        media_type="application/octet-stream",
+        filename=f"{case_id}_depth.npy",
+        headers={
+            "Content-Disposition": f'attachment; filename="{case_id}_depth.npy"'
+        },
+    )
+
+
+@app.get("/api/terrain/reconstruct/{case_id}/heightmap")
+def get_reconstruction_heightmap(case_id: str):
+    """
+    Serves the generated terrain heightmap PNG.
+    """
+    recon = ACTIVE_RECONSTRUCTIONS.get(case_id)
+    if not recon:
+        json_path = os.path.join(OUTPUTS_DIR, f"{case_id}.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                recon = json.load(f)
+
+    if not recon:
+        raise HTTPException(status_code=404, detail=f"Reconstruction case '{case_id}' not found.")
+
+    hm_rel = recon.get("heightmap_output")
+    if not hm_rel:
+        raise HTTPException(status_code=404, detail="Heightmap path not found.")
+
+    disk_path = os.path.join(
+        STATIC_DIR,
+        hm_rel.replace("/static/", "").replace("/", os.sep),
+    )
+
+    if not os.path.exists(disk_path):
+        raise HTTPException(status_code=404, detail="Heightmap file does not exist on disk.")
+
+    return FileResponse(
+        path=disk_path,
+        media_type="image/png",
+        filename=f"{case_id}_heightmap.png",
     )
 
 
