@@ -4,7 +4,13 @@ import uuid
 import glob
 import logging
 import threading
+import shutil
+import ast
+import time
+import httpx
 from typing import Optional, Dict
+
+from gradio_client import Client, handle_file
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +29,51 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("slopesentinel.api")
+
+def download_hf_artifact(url: str, dest_path: str, timeout: float = 60.0, max_retries: int = 3) -> bool:
+    """Robust streaming downloader for HF Gradio artifacts."""
+    if not url.startswith("http://") and not url.startswith("https://"):
+        # If it's a local file path and exists, just copy it
+        if os.path.exists(url):
+            shutil.copy2(url, dest_path)
+            return True
+        logger.error(f"Invalid URL or missing local path: {url}")
+        return False
+        
+    for attempt in range(1, max_retries + 1):
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=True) as http_client:
+                with http_client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    
+                    # Write to a temporary file first
+                    temp_dest = dest_path + ".tmp"
+                    bytes_downloaded = 0
+                    
+                    with open(temp_dest, "wb") as f:
+                        for chunk in response.iter_bytes(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                bytes_downloaded += len(chunk)
+                                
+                    if bytes_downloaded == 0:
+                        raise ValueError("Downloaded file is empty (0 bytes).")
+                        
+                    # Success, move to final path
+                    shutil.move(temp_dest, dest_path)
+                    logger.info(f"Successfully downloaded artifact ({bytes_downloaded} bytes) to {dest_path}")
+                    return True
+                    
+        except Exception as e:
+            logger.warning(f"Download attempt {attempt} failed for {url}: {e}")
+            if os.path.exists(dest_path + ".tmp"):
+                os.remove(dest_path + ".tmp")
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)  # exponential backoff 2, 4, 8...
+            else:
+                logger.error(f"All {max_retries} attempts failed to download {url}")
+                
+    return False
 
 app = FastAPI(
     title="SlopeSentinel DepthWizard Terrain Reconstruction API",
@@ -73,17 +124,15 @@ try:
 except Exception as e:
     logger.warning("Could not reload past reconstructions from disk: %s", e)
 
-# Create the singleton pipeline wrapper without loading model weights.
-logger.info("Initializing DepthWizard pipeline singleton...")
-pipeline = get_depthwizard_pipeline()
+# (Removed global DepthWizard pipeline instantiation to keep Render backend lightweight)
 
 @app.get("/")
 def read_root():
     return {
         "status": "online",
-        "system": "SlopeSentinel DepthWizard Engine",
-        "model": pipeline.model_name,
-        "device": pipeline.device,
+        "system": "SlopeSentinel DepthWizard Engine (Proxy)",
+        "model": "Depth Anything V2 (via HF Space)",
+        "device": "ZeroGPU (Remote)",
         "version": "2.0.0",
         "endpoints": {
             "reconstruct": "POST /api/terrain/reconstruct",
@@ -96,9 +145,9 @@ def read_root():
 def health_check():
     return {
         "status": "healthy",
-        "model": pipeline.model_name,
-        "device": pipeline.device,
-        "pipeline_version": "DepthWizard Engine v2.0",
+        "model": "Depth Anything V2 (via HF Space)",
+        "device": "ZeroGPU (Remote)",
+        "pipeline_version": "DepthWizard Engine v2.0 (Proxy)",
         "static_dir_ready": os.path.exists(STATIC_DIR),
     }
 
@@ -167,7 +216,7 @@ async def reconstruct_terrain(
     except Exception as e:
         logger.warning("Could not persist original upload to disk: %s", e)
 
-    # Execute DepthWizard Pipeline with graceful failure handling
+    # Execute DepthWizard Pipeline via Hugging Face Space proxy
     if not RECONSTRUCTION_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -176,23 +225,85 @@ async def reconstruct_terrain(
 
     try:
         try:
-            result = pipeline.run(
-                image_bytes=image_bytes,
-                static_dir=STATIC_DIR,
-                reference_elevation=reference_elevation,
-                calibration_mode=calibration_mode or "relative",
-                filename_prefix=f"recon_{req_uuid}"
+            # Initialize Gradio Client and call proxy
+            logger.info("Calling HF Space: Anii56/slopesentinel-depthwizard")
+            client = Client("Anii56/slopesentinel-depthwizard", download_files=False)
+            
+            hf_result = client.predict(
+                image=handle_file(upload_save_path),
+                api_name="/reconstruct"
             )
+            
+            # The result is expected to be a tuple of 5 items:
+            # DSM, Relative Depth, Heightmap, OBJ, Metadata
+            if not isinstance(hf_result, (list, tuple)) or len(hf_result) < 5:
+                raise ValueError("Invalid response format from Hugging Face Space.")
+                
+            dsm_res = hf_result[0]
+            depth_res = hf_result[1]
+            hm_res = hf_result[2]
+            obj_res = hf_result[3]
+            meta_str = hf_result[4]
+            
+            # Extract file urls from Gradio's return structures
+            def get_url(r):
+                if isinstance(r, dict):
+                    return r.get("url") or r.get("path")
+                if isinstance(r, str):
+                    return r
+                return getattr(r, "name", str(r))
+                
+            dsm_url = get_url(dsm_res)
+            depth_url = get_url(depth_res)
+            hm_url = get_url(hm_res)
+            obj_url = get_url(obj_res)
+            
+            # Download files to local static outputs dir
+            dsm_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_dsm.png")
+            depth_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_depth.npy")
+            hm_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_heightmap.png")
+            obj_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_terrain.obj")
+            
+            if dsm_url:
+                if not download_hf_artifact(dsm_url, dsm_dest, timeout=60.0):
+                    raise ValueError(f"Failed to download DSM artifact from {dsm_url}")
+            
+            if depth_url:
+                if not download_hf_artifact(depth_url, depth_dest, timeout=120.0):
+                    logger.warning(f"Failed to download Depth artifact from {depth_url}")
+            
+            if hm_url:
+                if not download_hf_artifact(hm_url, hm_dest, timeout=60.0):
+                    logger.warning(f"Failed to download Heightmap artifact from {hm_url}")
+            
+            if obj_url:
+                if not download_hf_artifact(obj_url, obj_dest, timeout=180.0):
+                    raise ValueError(f"Failed to download OBJ mesh artifact from {obj_url}")
+            
+            # Parse metadata
+            metadata = ast.literal_eval(meta_str) if isinstance(meta_str, str) else meta_str
+            metadata["original_filename"] = filename
+            
+            # Construct standard result
+            cid = f"live_recon_{req_uuid}"
+            result = {
+                "status": "success",
+                "case_id": cid,
+                "source_image": f"/static/uploads/{safe_name}",
+                "input_image": f"/static/uploads/{safe_name}",
+                "dsm_output": f"/static/outputs/recon_{req_uuid}_dsm.png",
+                "dsm": f"/static/outputs/recon_{req_uuid}_dsm.png",
+                "depth_array": f"/static/outputs/recon_{req_uuid}_depth.npy",
+                "heightmap_output": f"/static/outputs/recon_{req_uuid}_heightmap.png",
+                "mesh_output": f"/static/outputs/recon_{req_uuid}_terrain.obj",
+                "mesh": f"/static/outputs/recon_{req_uuid}_terrain.obj",
+                "metadata": metadata
+            }
+            
         finally:
             RECONSTRUCTION_LOCK.release()
 
-        result["source_image"] = f"/static/uploads/{safe_name}"
-        result["input_image"] = f"/static/uploads/{safe_name}"
-        result["metadata"]["original_filename"] = filename
-
         # Store in active registry and persist to disk
-        cid = result.get("case_id", f"live_recon_{req_uuid}")
-        result["case_id"] = cid
         ACTIVE_RECONSTRUCTIONS[cid] = result
         global LATEST_RECONSTRUCTION_ID
         LATEST_RECONSTRUCTION_ID = cid
@@ -204,24 +315,30 @@ async def reconstruct_terrain(
         except Exception as err:
             logger.warning("Could not persist reconstruction JSON to disk: %s", err)
 
+        infer_t = result.get("metadata", {}).get("inference_time_s", 0)
+        mesh_t = result.get("metadata", {}).get("mesh_generation_time_s", 0)
         logger.info(
             "Completed DepthWizard synthesis for %s (Case ID: %s, Infer: %.2fs, Mesh: %.2fs)",
-            filename, cid,
-            result["metadata"]["inference_time_s"],
-            result["metadata"]["mesh_generation_time_s"]
+            filename, cid, infer_t, mesh_t
         )
         return result
 
     except ValueError as ve:
-        # Invalid image content (corrupted, unparseable)
-        logger.error("Image validation error during DepthWizard processing: %s", ve)
+        error_msg = str(ve)
+        logger.error("Hugging Face Proxy Error: %s", ve)
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Image decoding failed: {str(ve)}"
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Hugging Face Proxy Error: {error_msg}"
+        )
+    except httpx.TimeoutException as te:
+        logger.error("Hugging Face Gateway Timeout: %s", te)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Hugging Face Gateway Timeout. Please try again later."
         )
     except Exception as e:
         # Unexpected processing exception - log error, do not crash server
-        logger.exception("Unexpected error in DepthWizard pipeline: %s", e)
+        logger.exception("Unexpected error in Hugging Face Proxy: %s", e)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
