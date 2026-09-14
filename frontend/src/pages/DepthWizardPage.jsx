@@ -248,7 +248,7 @@ export default function DepthWizardPage({ onNavigate }) {
           <div className="flex items-center gap-2">
             {resultData.mesh && (
               <a
-                href={resultData.mesh}
+                href={apiUrl(resultData.mesh)}
                 download="terrain_mesh.obj"
                 className="px-2.5 py-1 rounded bg-surface-container-high hover:bg-surface-container-highest text-primary font-label-sm text-[11px] flex items-center gap-1 border border-outline-variant/40 transition-colors"
               >
@@ -675,7 +675,7 @@ export default function DepthWizardPage({ onNavigate }) {
               <div className="relative h-48 w-full rounded-lg overflow-hidden bg-surface-container-lowest shadow-inner flex flex-col justify-end">
                 {resultData?.depth_map ? (
                   <img
-                    src={resultData.depth_map}
+                    src={apiUrl(resultData.depth_map)}
                     alt="DepthWizard Inferred Depth Map"
                     className="absolute inset-0 w-full h-full object-cover"
                   />
@@ -716,7 +716,7 @@ export default function DepthWizardPage({ onNavigate }) {
                 <div className="flex items-center gap-2">
                   {resultData?.heightmap && (
                     <a
-                      href={resultData.heightmap}
+                      href={apiUrl(resultData.heightmap)}
                       target="_blank"
                       rel="noreferrer"
                       className="font-label-sm text-[10px] text-secondary bg-surface-container-lowest px-2 py-0.5 rounded border border-outline-variant/30 hover:text-primary transition-colors"
@@ -736,7 +736,7 @@ export default function DepthWizardPage({ onNavigate }) {
                 {resultData?.dsm ? (
                   <div className="relative w-full h-full">
                     <img
-                      src={resultData.dsm}
+                      src={apiUrl(resultData.dsm)}
                       alt="DepthWizard Generated DSM"
                       className="w-full h-full object-cover filter contrast-110"
                     />
@@ -800,9 +800,9 @@ export default function DepthWizardPage({ onNavigate }) {
               <div className="relative h-64 w-full rounded-lg overflow-hidden bg-surface-container-lowest shadow-inner flex items-center justify-center border border-outline-variant/30">
                 {resultData?.mesh_output || resultData?.mesh ? (
                   <ThreeTerrainViewer
-                    meshUrl={resultData.mesh_output || resultData.mesh}
-                    textureUrl={resultData.source_image || resultData.input_image}
-                    dsmUrl={resultData.dsm_output || resultData.dsm}
+                    meshUrl={apiUrl(resultData.mesh_output || resultData.mesh)}
+                    textureUrl={apiUrl(resultData.source_image || resultData.input_image)}
+                    dsmUrl={apiUrl(resultData.dsm_output || resultData.dsm)}
                     title="Live 3D Mesh Preview"
                     className="w-full h-full"
                     autoRotate={false}
@@ -821,7 +821,7 @@ export default function DepthWizardPage({ onNavigate }) {
                 <div className="flex items-center gap-2">
                   {resultData?.mesh && (
                     <a
-                      href={resultData.mesh}
+                      href={apiUrl(resultData.mesh)}
                       download="terrain_surface.obj"
                       className="text-primary hover:underline font-mono font-medium flex items-center gap-1"
                     >

@@ -9,6 +9,8 @@ import ast
 import time
 import httpx
 from typing import Optional, Dict
+import numpy as np
+from PIL import Image
 
 from gradio_client import Client, handle_file
 
@@ -29,6 +31,27 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("slopesentinel.api")
+
+def render_depth_colormap_local(normalized_depth: np.ndarray) -> Image.Image:
+    """Renders relative depth into a high-visibility colormap (inferno-like)."""
+    d = np.clip(normalized_depth, 0.0, 1.0)
+    
+    r = np.clip(
+        np.where(d < 0.5, 11 + d * 2.0 * (37 - 11), 37 + (d - 0.5) * 2.0 * (255 - 37)),
+        0, 255
+    ).astype(np.uint8)
+    
+    g = np.clip(
+        np.where(d < 0.5, 21 + d * 2.0 * (81 - 21), 81 + (d - 0.5) * 2.0 * (217 - 81)),
+        0, 255
+    ).astype(np.uint8)
+    
+    b = np.clip(
+        np.where(d < 0.5, 19 + d * 2.0 * (69 - 19), 69 + (d - 0.5) * 2.0 * (209 - 69)),
+        0, 255
+    ).astype(np.uint8)
+    
+    return Image.fromarray(np.stack([r, g, b], axis=-1))
 
 def download_hf_artifact(url: str, dest_path: str, timeout: float = 60.0, max_retries: int = 3) -> bool:
     """Robust streaming downloader for HF Gradio artifacts."""
@@ -227,7 +250,15 @@ async def reconstruct_terrain(
         try:
             # Initialize Gradio Client and call proxy
             logger.info("Calling HF Space: Anii56/slopesentinel-depthwizard")
-            client = Client("Anii56/slopesentinel-depthwizard", download_files=False)
+            hf_token = os.environ.get("HF_TOKEN")
+            if not hf_token:
+                logger.warning("HF_TOKEN environment variable not found. Using anonymous access which is subject to strict ZeroGPU quotas.")
+                
+            client = Client(
+                "Anii56/slopesentinel-depthwizard", 
+                token=hf_token,
+                download_files=False
+            )
             
             hf_result = client.predict(
                 image=handle_file(upload_save_path),
@@ -261,6 +292,7 @@ async def reconstruct_terrain(
             # Download files to local static outputs dir
             dsm_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_dsm.png")
             depth_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_depth.npy")
+            depth_png_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_depth.png")
             hm_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_heightmap.png")
             obj_dest = os.path.join(OUTPUTS_DIR, f"recon_{req_uuid}_terrain.obj")
             
@@ -271,6 +303,14 @@ async def reconstruct_terrain(
             if depth_url:
                 if not download_hf_artifact(depth_url, depth_dest, timeout=120.0):
                     logger.warning(f"Failed to download Depth artifact from {depth_url}")
+                else:
+                    # Generate visual PNG from downloaded NPY
+                    try:
+                        arr = np.load(depth_dest)
+                        img = render_depth_colormap_local(arr)
+                        img.save(depth_png_dest, format="PNG")
+                    except Exception as e:
+                        logger.warning(f"Failed to render visual depth map: {e}")
             
             if hm_url:
                 if not download_hf_artifact(hm_url, hm_dest, timeout=60.0):
@@ -293,6 +333,7 @@ async def reconstruct_terrain(
                 "input_image": f"/static/uploads/{safe_name}",
                 "dsm_output": f"/static/outputs/recon_{req_uuid}_dsm.png",
                 "dsm": f"/static/outputs/recon_{req_uuid}_dsm.png",
+                "depth_map": f"/static/outputs/recon_{req_uuid}_depth.png",
                 "depth_array": f"/static/outputs/recon_{req_uuid}_depth.npy",
                 "heightmap_output": f"/static/outputs/recon_{req_uuid}_heightmap.png",
                 "mesh_output": f"/static/outputs/recon_{req_uuid}_terrain.obj",
@@ -335,6 +376,12 @@ async def reconstruct_terrain(
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="Hugging Face Gateway Timeout. Please try again later."
+        )
+    except httpx.RequestError as re:
+        logger.error("Hugging Face Network Error: %s", re)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Hugging Face Network Error. Please try again later."
         )
     except Exception as e:
         # Unexpected processing exception - log error, do not crash server
