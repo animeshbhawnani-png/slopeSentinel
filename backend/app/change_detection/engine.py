@@ -10,8 +10,10 @@ import numpy as np
 from PIL import Image
 import scipy.ndimage as ndimage
 
-from app.depthwizard.pipeline import get_depthwizard_pipeline
-
+import tempfile
+import ast
+import httpx
+from gradio_client import Client, handle_file
 logger = logging.getLogger("change_detection")
 logger.setLevel(logging.INFO)
 
@@ -28,7 +30,8 @@ class TemporalChangeEngine:
     """
 
     def __init__(self):
-        self.pipeline = get_depthwizard_pipeline()
+        # We no longer instantiate the heavy local DepthWizard pipeline
+        pass
 
     def align_rasters(self, before_arr: np.ndarray, after_arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -235,42 +238,116 @@ class TemporalChangeEngine:
 
         return regions
 
+    def _extract_url(self, r):
+        if isinstance(r, dict):
+            return r.get("url") or r.get("path")
+        if isinstance(r, str):
+            return r
+        return getattr(r, "name", str(r))
+
+    def _download_hf_artifact(self, url: str, dest_path: str, timeout: float = 120.0, max_retries: int = 3) -> bool:
+        if not url.startswith("http://") and not url.startswith("https://"):
+            import shutil
+            shutil.copy2(url, dest_path)
+            return True
+
+        for attempt in range(max_retries):
+            try:
+                tmp_path = dest_path + ".tmp"
+                with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as response:
+                    response.raise_for_status()
+                    with open(tmp_path, "wb") as f:
+                        for chunk in response.iter_bytes(chunk_size=8192):
+                            f.write(chunk)
+                os.replace(tmp_path, dest_path)
+                return True
+            except Exception as e:
+                logger.warning(f"Download attempt {attempt+1} failed: {e}")
+                if os.path.exists(dest_path + ".tmp"):
+                    try:
+                        os.remove(dest_path + ".tmp")
+                    except:
+                        pass
+                if attempt == max_retries - 1:
+                    return False
+                time.sleep(2)
+        return False
+
+    def _infer_depth_hf(self, image_bytes: bytes, filename: str) -> np.ndarray:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            upload_path = os.path.join(tmpdir, filename)
+            with open(upload_path, "wb") as f:
+                f.write(image_bytes)
+
+            hf_token = os.environ.get("HF_TOKEN")
+            if not hf_token:
+                logger.warning("HF_TOKEN environment variable not found. Using anonymous access.")
+
+            client = Client(
+                "Anii56/slopesentinel-depthwizard",
+                token=hf_token,
+                download_files=False
+            )
+
+            hf_result = client.predict(
+                image=handle_file(upload_path),
+                api_name="/reconstruct"
+            )
+
+            if not isinstance(hf_result, (list, tuple)) or len(hf_result) < 5:
+                raise ValueError("Invalid response format from HF Space.")
+
+            depth_url = self._extract_url(hf_result[1])
+            if not depth_url:
+                raise ValueError("No relative depth artifact returned from HF Space.")
+
+            depth_dest = os.path.join(tmpdir, "depth.npy")
+            if not self._download_hf_artifact(depth_url, depth_dest):
+                raise ValueError(f"Failed to download Depth artifact from {depth_url}")
+
+            depth_arr = np.load(depth_dest, allow_pickle=False).astype(np.float32)
+            if depth_arr.ndim != 2 or depth_arr.size == 0:
+                raise ValueError("Invalid depth array returned from HF.")
+            
+            return depth_arr
+
     def analyze_custom_pair(
         self,
-        before_bytes: bytes,
         after_bytes: bytes,
         static_dir: str,
-        before_label: str = "Custom Baseline Observation",
-        after_label: str = "Custom Repeat Observation"
+        before_bytes: Optional[bytes] = None,
+        before_depth_array_path: Optional[str] = None,
+        before_label: str = "Baseline Observation",
+        after_label: str = "Repeat Pass Observation",
+        req_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Executes change detection between two custom user-uploaded images.
+        Executes change detection between two custom user-uploaded images,
+        or an existing active reconstruction and a new custom uploaded image.
         """
         t0 = time.time()
-        req_id = str(uuid.uuid4())[:8]
+        if req_id is None:
+            req_id = str(uuid.uuid4())[:8]
 
         # 1. Reconstruct Before
-        before_result = self.pipeline.run(
-            image_bytes=before_bytes,
-            static_dir=static_dir,
-            calibration_mode="relative",
-            filename_prefix=f"custom_{req_id}_before"
-        )
+        if before_depth_array_path and os.path.exists(before_depth_array_path):
+            before_depth = np.load(before_depth_array_path, allow_pickle=False).astype(np.float32)
+            before_result = {
+                "depth_map": "", "dsm": "", "mesh": "", "heuristic_indicators": []
+            }
+        elif before_bytes:
+            before_depth = self._infer_depth_hf(before_bytes, f"before_{req_id}.png")
+            before_result = {
+                "depth_map": "", "dsm": "", "mesh": "", "heuristic_indicators": []
+            }
+        else:
+            raise ValueError("Either before_bytes or before_depth_array_path must be provided.")
 
         # 2. Reconstruct After
-        after_result = self.pipeline.run(
-            image_bytes=after_bytes,
-            static_dir=static_dir,
-            calibration_mode="relative",
-            filename_prefix=f"custom_{req_id}_after"
-        )
-
-        # 3. Load depth tensors
-        before_depth_path = os.path.join(static_dir, before_result["depth_array"].replace("/static/", ""))
-        after_depth_path = os.path.join(static_dir, after_result["depth_array"].replace("/static/", ""))
-
-        before_depth = np.load(before_depth_path)
-        after_depth = np.load(after_depth_path)
+        after_depth = self._infer_depth_hf(after_bytes, f"after_{req_id}.png")
+        after_result = {
+            "depth_map": "", "dsm": "", "mesh": "", "heuristic_indicators": []
+        }
 
         # 4. Difference & Segmentation
         diff_arr, classes, stats = self.compute_terrain_difference(before_depth, after_depth)
@@ -290,8 +367,9 @@ class TemporalChangeEngine:
         web_before_path = os.path.join(static_uploads, f"custom_{req_id}_before.png")
         web_after_path = os.path.join(static_uploads, f"custom_{req_id}_after.png")
 
-        with open(web_before_path, "wb") as f:
-            f.write(before_bytes)
+        if before_bytes:
+            with open(web_before_path, "wb") as f:
+                f.write(before_bytes)
         with open(web_after_path, "wb") as f:
             f.write(after_bytes)
 
@@ -320,24 +398,24 @@ class TemporalChangeEngine:
             "confidence": None,
             "confidence_message": "Change confidence not quantified for this prototype.",
             "before": {
-                "image": f"/static/uploads/custom_{req_id}_before.png",
+                "image": f"/static/uploads/custom_{req_id}_before.png" if before_bytes else None,
                 "date": "User Upload Baseline",
                 "conditions": "Optical Survey",
                 "sensor": before_label,
-                "depth_map": before_result["depth_map"],
-                "dsm": before_result["dsm"],
-                "mesh": before_result["mesh"],
-                "heuristic_indicators": before_result["heuristic_indicators"]
+                "depth_map": before_result.get("depth_map", ""),
+                "dsm": before_result.get("dsm", ""),
+                "mesh": before_result.get("mesh", ""),
+                "heuristic_indicators": before_result.get("heuristic_indicators", [])
             },
             "after": {
                 "image": f"/static/uploads/custom_{req_id}_after.png",
                 "date": "User Upload Repeat",
                 "conditions": "Optical Re-Survey",
                 "sensor": after_label,
-                "depth_map": after_result["depth_map"],
-                "dsm": after_result["dsm"],
-                "mesh": after_result["mesh"],
-                "heuristic_indicators": after_result["heuristic_indicators"]
+                "depth_map": after_result.get("depth_map", ""),
+                "dsm": after_result.get("dsm", ""),
+                "mesh": after_result.get("mesh", ""),
+                "heuristic_indicators": after_result.get("heuristic_indicators", [])
             },
             "change_map": change_map_rel,
             "change_array": change_npy_rel,
@@ -359,7 +437,6 @@ class TemporalChangeEngine:
                 )
             }
         }
-
 
 
 # Singleton engine accessor

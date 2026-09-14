@@ -542,20 +542,24 @@ async def analyze_temporal_change(
                 except Exception as e:
                     logger.warning("Error reading cached case %s: %s", json_path, e)
         if recon:
-            src_rel = recon.get("source_image") or recon.get("input_image")
-            if src_rel:
-                disk_path = os.path.join(STATIC_DIR, src_rel.replace("/static/", "").replace("/", os.sep))
+            depth_array_rel = recon.get("depth_array")
+            if depth_array_rel:
+                disk_path = os.path.join(STATIC_DIR, depth_array_rel.replace("/static/", "").replace("/", os.sep))
                 if os.path.exists(disk_path):
-                    with open(disk_path, "rb") as f:
-                        before_bytes = f.read()
                     after_bytes = await after_file.read()
-                    return engine.analyze_custom_pair(
-                        before_bytes=before_bytes,
-                        after_bytes=after_bytes,
-                        static_dir=STATIC_DIR,
-                        before_label=recon.get("metadata", {}).get("original_filename", "Live Baseline"),
-                        after_label=after_file.filename or "Repeat Pass"
-                    )
+                    try:
+                        return engine.analyze_custom_pair(
+                            after_bytes=after_bytes,
+                            static_dir=STATIC_DIR,
+                            before_depth_array_path=disk_path,
+                            before_label=recon.get("metadata", {}).get("original_filename", "Live Baseline"),
+                            after_label=after_file.filename or "Repeat Pass"
+                        )
+                    except ValueError as ve:
+                        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"DepthWizard remote reconstruction failed. Please retry: {str(ve)}")
+                    except Exception as e:
+                        logger.exception("Temporal change analysis failed: %s", e)
+                        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Change analysis failed: {str(e)}")
 
     # If custom files are uploaded, process custom pair
     if before_file is not None and after_file is not None:
@@ -570,15 +574,17 @@ async def analyze_temporal_change(
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty (0 bytes).")
             
             result = engine.analyze_custom_pair(
-                before_bytes=before_bytes,
                 after_bytes=after_bytes,
                 static_dir=STATIC_DIR,
+                before_bytes=before_bytes,
                 before_label=before_file.filename or "Baseline Observation",
                 after_label=after_file.filename or "Repeat Pass Observation"
             )
             return result
         except HTTPException:
             raise
+        except ValueError as ve:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"DepthWizard remote reconstruction failed. Please retry: {str(ve)}")
         except Exception as e:
             logger.exception("Temporal change analysis failed: %s", e)
             raise HTTPException(

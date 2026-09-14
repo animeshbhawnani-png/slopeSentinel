@@ -569,7 +569,7 @@ export default function ChangeDetectionPage({ onNavigate }) {
             <div className="bg-surface-container-high p-2 rounded-DEFAULT">
               <span className="font-label-sm text-[10px] text-outline block">CONFIDENCE METRIC</span>
               <span className="font-label-sm text-label-sm text-tertiary font-semibold block" title="Confidence not quantified for this prototype">
-                null (Prototype)
+                NOT QUANTIFIED
               </span>
             </div>
           </div>
@@ -851,7 +851,7 @@ export default function ChangeDetectionPage({ onNavigate }) {
                   POTENTIAL CHANGE: {resultData?.overall_classification || 'AWAITING OBSERVATIONS'}
                 </span>
                 <span className="px-2 py-1 rounded-DEFAULT bg-surface-container-high font-label-sm text-label-sm text-tertiary" title="Change confidence not quantified for this prototype">
-                  CHANGE CONFIDENCE: NULL (NOT QUANTIFIED)
+                  CHANGE CONFIDENCE: NOT QUANTIFIED
                 </span>
               </div>
               <span className="font-label-sm text-[11px] text-outline font-mono">
