@@ -11,6 +11,19 @@ export default function ChangeDetectionPage({ onNavigate }) {
 
   const [splitPos, setSplitPos] = useState(50); // Split wipe percentage (0 - 100)
   
+  const resolveAssetUrl = (value) => {
+    if (!value) return null;
+    if (
+      value.startsWith('blob:') ||
+      value.startsWith('data:') ||
+      value.startsWith('http://') ||
+      value.startsWith('https://')
+    ) {
+      return value;
+    }
+    return apiUrl(value);
+  };
+
   // Observation A (Baseline) and Observation B (Repeat Pass)
   const [beforeObservation, setBeforeObservation] = useState(() => {
     if (activeCase?.reconstruction) {
@@ -647,7 +660,7 @@ export default function ChangeDetectionPage({ onNavigate }) {
                 <img 
                   className="w-full h-full object-cover filter brightness-95" 
                   alt="Baseline terrain raster" 
-                  src={resultData.before?.image || beforeObservation?.url}
+                  src={resolveAssetUrl(resultData.before?.image) || beforeObservation?.url}
                 />
                 <div className="absolute inset-0 bg-secondary-container/10 mix-blend-multiply"></div>
               </div>
@@ -662,13 +675,13 @@ export default function ChangeDetectionPage({ onNavigate }) {
                   <img 
                     className="w-full h-full object-cover filter contrast-110" 
                     alt="Repeat observation with change raster" 
-                    src={resultData.after?.image || afterObservation?.url}
+                    src={resolveAssetUrl(resultData.after?.image) || afterObservation?.url}
                   />
 
                   {/* Change raster heatmap overlay */}
                   {resultData.change_map && (
                     <img
-                      src={resultData.change_map}
+                      src={resolveAssetUrl(resultData.change_map)}
                       alt="Differential Elevation Raster"
                       className="absolute inset-0 w-full h-full object-cover opacity-65 mix-blend-overlay pointer-events-none"
                     />

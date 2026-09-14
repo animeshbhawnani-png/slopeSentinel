@@ -11,9 +11,120 @@ import numpy as np
 from PIL import Image
 import h5py
 
-from app.depthwizard.pipeline import get_depthwizard_pipeline
+import httpx
+import tempfile
+from gradio_client import Client, handle_file
 
 logger = logging.getLogger("slopesentinel.validation")
+HF_SPACE = "Anii56/slopesentinel-depthwizard"
+
+def _extract_artifact_url(r):
+    if r is None:
+        raise ValueError("HF DepthWizard did not return a valid depth artifact.")
+    url = None
+    if isinstance(r, dict):
+        url = r.get("url") or r.get("path")
+    elif isinstance(r, str):
+        url = r
+    else:
+        url = getattr(r, "name", None)
+    if not url:
+        raise ValueError("HF DepthWizard did not return a valid depth artifact.")
+    url = str(url)
+    if url == "None" or not url.strip():
+        raise ValueError("HF DepthWizard did not return a valid depth artifact.")
+    return url
+
+def _download_hf_artifact(url: str, dest_path: str, timeout: float = 120.0, max_retries: int = 3) -> bool:
+    if not url.startswith("http://") and not url.startswith("https://"):
+        shutil.copy2(url, dest_path)
+        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+            return True
+        return False
+
+    for attempt in range(max_retries):
+        try:
+            tmp_path = dest_path + ".tmp"
+            with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as response:
+                response.raise_for_status()
+                with open(tmp_path, "wb") as f:
+                    for chunk in response.iter_bytes(chunk_size=8192):
+                        f.write(chunk)
+            if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                os.replace(tmp_path, dest_path)
+                return True
+            else:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        except Exception as e:
+            logger.warning("Download attempt %d failed: %s", attempt + 1, e)
+            if os.path.exists(dest_path + ".tmp"):
+                try:
+                    os.remove(dest_path + ".tmp")
+                except:
+                    pass
+            if attempt == max_retries - 1:
+                return False
+            time.sleep(2)
+    return False
+
+def _infer_depth_hf_raw(image_bytes: bytes, filename: str) -> Tuple[np.ndarray, float]:
+    if not image_bytes:
+        raise ValueError("Input image is empty.")
+
+    t0 = time.time()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        safe_name = os.path.basename(filename) or "terrain.png"
+        upload_path = os.path.join(tmpdir, safe_name)
+
+        with open(upload_path, "wb") as f:
+            f.write(image_bytes)
+
+        hf_token = os.environ.get("HF_TOKEN")
+        client = Client(
+            HF_SPACE,
+            token=hf_token,
+            download_files=False,
+        )
+
+        hf_result = client.predict(
+            image=handle_file(upload_path),
+            api_name="/reconstruct",
+        )
+
+        if not isinstance(hf_result, (list, tuple)):
+            raise ValueError("Invalid response format from HF Space.")
+
+        if len(hf_result) < 6:
+            raise ValueError(f"HF DepthWizard returned {len(hf_result)} outputs; 6 outputs are required.")
+
+        # Output #5 is the raw numerical depth array (.npy)
+        raw_depth_source = _extract_artifact_url(hf_result[5])
+        depth_dest = os.path.join(tmpdir, "depth.npy")
+
+        if not _download_hf_artifact(raw_depth_source, depth_dest, timeout=120.0):
+            raise ValueError("Failed to download raw DepthWizard .npy artifact.")
+
+        if not os.path.exists(depth_dest) or os.path.getsize(depth_dest) <= 0:
+            raise ValueError("Raw DepthWizard .npy artifact is missing or empty.")
+
+        try:
+            depth_arr = np.load(depth_dest, allow_pickle=False).astype(np.float32)
+        except Exception as exc:
+            raise ValueError(f"Failed to load raw depth array: {exc}")
+
+        if depth_arr.ndim != 2:
+            raise ValueError(f"Raw depth array must be 2D; received {depth_arr.shape}.")
+
+        if depth_arr.size == 0:
+            raise ValueError("Raw depth array is empty.")
+
+        if not np.any(np.isfinite(depth_arr)):
+            raise ValueError("Raw depth array contains no finite values.")
+
+        proc_time = round(time.time() - t0, 3)
+        return depth_arr, proc_time
+HF_SPACE = "Anii56/slopesentinel-depthwizard"
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -299,18 +410,7 @@ def evaluate_gamus_sample(
     with open(rgb_path, "rb") as f:
         rgb_bytes = f.read()
 
-    pipeline = get_depthwizard_pipeline()
-    t0 = time.time()
-    res = pipeline.run(
-        image_bytes=rgb_bytes,
-        static_dir=STATIC_DIR,
-        filename_prefix=f"gamus_eval_{sample_id.lower()}"
-    )
-    proc_time = round(time.time() - t0, 3)
-
-    dsm_filename = os.path.basename(res["dsm_array"])
-    dsm_path = os.path.join(STATIC_DIR, "outputs", dsm_filename)
-    pred_dsm = np.load(dsm_path)
+    pred_dsm, proc_time = _infer_depth_hf_raw(rgb_bytes, f"gamus_eval_{sample_id.lower()}.png")
 
     with h5py.File(ref_path, "r") as hf:
         if "image" not in hf:
@@ -339,18 +439,7 @@ def evaluate_custom_sample(
     with open(rgb_path, "wb") as f:
         f.write(rgb_bytes)
 
-    pipeline = get_depthwizard_pipeline()
-    t0 = time.time()
-    res = pipeline.run(
-        image_bytes=rgb_bytes,
-        static_dir=STATIC_DIR,
-        filename_prefix=f"custom_eval_{sample_id.lower()}"
-    )
-    proc_time = round(time.time() - t0, 3)
-
-    dsm_filename = os.path.basename(res["dsm_array"])
-    dsm_path = os.path.join(STATIC_DIR, "outputs", dsm_filename)
-    pred_dsm = np.load(dsm_path)
+    pred_dsm, proc_time = _infer_depth_hf_raw(rgb_bytes, f"custom_eval_{sample_id.lower()}.png")
 
     if ref_bytes:
         ref_path = os.path.join(VALIDATION_DIR, f"{sample_id}_upload_ref.h5")
@@ -396,11 +485,23 @@ def get_aggregate_benchmark_summary() -> Dict[str, Any]:
 
     results = []
     for sid in ready_samples:
-        try:
-            r = evaluate_gamus_sample(sid, comparison_mode="scale_aligned")
-            results.append(r)
-        except Exception as e:
-            logger.error("Error evaluating benchmark sample %s: %s", sid, e)
+        cache_file = os.path.join(VALIDATION_DIR, f"cache_{sid.lower()}_metric.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+                    cached_data["is_cached"] = True
+                    results.append(cached_data)
+            except Exception as e:
+                logger.error("Error reading cached benchmark sample %s: %s", sid, e)
+        else:
+            # If there is no cached result, DO NOT trigger HF inference.
+            logger.info("Skipping sample %s in summary due to missing cache.", sid)
+            skipped_samples.append({
+                "sample_id": sid,
+                "has_reference": True,
+                "status": "SKIPPED - NOT CACHED"
+            })
 
     if not results:
         return {

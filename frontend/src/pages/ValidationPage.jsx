@@ -14,6 +14,19 @@ export default function ValidationPage({ onNavigate }) {
   const [rgbFile, setRgbFile] = useState(null);
   const [refFile, setRefFile] = useState(null);
 
+  const resolveAssetUrl = (value) => {
+    if (!value) return null;
+    if (
+      value.startsWith('blob:') ||
+      value.startsWith('data:') ||
+      value.startsWith('http://') ||
+      value.startsWith('https://')
+    ) {
+      return value;
+    }
+    return apiUrl(value);
+  };
+
   // Load available GAMUS samples and aggregate summary on mount
   useEffect(() => {
     fetch(apiUrl('/api/validation/samples'))
@@ -364,11 +377,11 @@ export default function ValidationPage({ onNavigate }) {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-space-md">
                 <div className="flex flex-col bg-surface-container-low rounded-DEFAULT overflow-hidden shadow-md border border-outline-variant/40">
                   <div className="p-space-md bg-surface-container"><span className="font-label-sm text-label-sm font-semibold uppercase tracking-wider text-primary">RGB INPUT</span></div>
-                  <img src={validationData.images.rgb} className="w-full h-80 object-cover" alt="RGB Input" />
+                  <img src={resolveAssetUrl(validationData.images.rgb)} className="w-full h-80 object-cover" alt="RGB Input" />
                 </div>
                 <div className="flex flex-col bg-surface-container-low rounded-DEFAULT overflow-hidden shadow-md border border-outline-variant/40">
                   <div className="p-space-md bg-surface-container"><span className="font-label-sm text-label-sm font-semibold uppercase tracking-wider text-secondary">PREDICTED DEPTH SURFACE</span></div>
-                  <img src={validationData.images.prediction} className="w-full h-80 object-cover" alt="Predicted Depth" />
+                  <img src={resolveAssetUrl(validationData.images.prediction)} className="w-full h-80 object-cover" alt="Predicted Depth" />
                 </div>
               </div>
             </div>
@@ -404,7 +417,7 @@ export default function ValidationPage({ onNavigate }) {
                   <img
                     className="w-full h-full object-cover"
                     alt="Official GAMUS reference elevation surface"
-                    src={validationData.images.reference}
+                    src={resolveAssetUrl(validationData.images.reference)}
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-surface-container-low/80 via-transparent to-transparent pointer-events-none"></div>
 
@@ -460,7 +473,7 @@ export default function ValidationPage({ onNavigate }) {
                   <img
                     className="w-full h-full object-cover"
                     alt="DepthWizard predicted terrain surface"
-                    src={validationData.images.prediction}
+                    src={resolveAssetUrl(validationData.images.prediction)}
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-surface-container-low/80 via-transparent to-transparent pointer-events-none"></div>
 
@@ -515,7 +528,7 @@ export default function ValidationPage({ onNavigate }) {
                   <img
                     className="w-full h-full object-cover"
                     alt="Spatial error residual heatmap"
-                    src={validationData.images.error_heatmap}
+                    src={resolveAssetUrl(validationData.images.error_heatmap)}
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-surface-container-low/80 via-transparent to-transparent pointer-events-none"></div>
 
