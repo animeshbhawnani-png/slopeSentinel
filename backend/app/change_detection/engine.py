@@ -17,6 +17,8 @@ from gradio_client import Client, handle_file
 logger = logging.getLogger("change_detection")
 logger.setLevel(logging.INFO)
 
+HF_SPACE = "Anii56/slopesentinel-depthwizard"
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -238,19 +240,36 @@ class TemporalChangeEngine:
 
         return regions
 
-    def _extract_artifact_url(self, r):
-        if not r:
-            raise ValueError("HF DepthWizard did not return a valid depth artifact.")
+    def _extract_artifact_url(self, r, label="artifact"):
+        """
+        Resolve a Gradio output into a local path or URL.
+        """
+        if r is None:
+            raise ValueError(
+                f"HF DepthWizard did not return a valid {label} artifact."
+            )
+
         url = None
+
         if isinstance(r, dict):
             url = r.get("url") or r.get("path")
         elif isinstance(r, str):
             url = r
         else:
-            url = getattr(r, "name", str(r))
-        
-        if not url or url == "None":
-            raise ValueError("HF DepthWizard did not return a valid depth artifact.")
+            url = getattr(r, "name", None)
+
+        if not url:
+            raise ValueError(
+                f"HF DepthWizard did not return a valid {label} artifact."
+            )
+
+        url = str(url)
+
+        if url == "None" or not url.strip():
+            raise ValueError(
+                f"HF DepthWizard did not return a valid {label} artifact."
+            )
+
         return url
 
     def _download_hf_artifact(self, url: str, dest_path: str, timeout: float = 120.0, max_retries: int = 3) -> bool:
@@ -288,46 +307,115 @@ class TemporalChangeEngine:
         return False
 
     def _infer_depth_hf(self, image_bytes: bytes, filename: str) -> np.ndarray:
+        """
+        Run remote DepthWizard inference and consume HF output #5,
+        the RAW Relative Depth .npy file.
+        """
+        if not image_bytes:
+            raise ValueError("Input image is empty.")
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            upload_path = os.path.join(tmpdir, filename)
+            safe_name = os.path.basename(filename) or "terrain.png"
+            upload_path = os.path.join(tmpdir, safe_name)
+
             with open(upload_path, "wb") as f:
                 f.write(image_bytes)
 
             hf_token = os.environ.get("HF_TOKEN")
             if not hf_token:
-                logger.warning("HF_TOKEN environment variable not found. Using anonymous access.")
+                logger.warning(
+                    "HF_TOKEN environment variable not found. "
+                    "Using anonymous HF access."
+                )
 
             client = Client(
-                "Anii56/slopesentinel-depthwizard",
+                HF_SPACE,
                 token=hf_token,
-                download_files=False
+                download_files=False,
             )
 
             hf_result = client.predict(
                 image=handle_file(upload_path),
-                api_name="/reconstruct"
+                api_name="/reconstruct",
             )
 
-            if not isinstance(hf_result, (list, tuple)) or len(hf_result) < 5:
-                raise ValueError("Invalid response format from HF Space.")
+            if not isinstance(hf_result, (list, tuple)):
+                raise ValueError(
+                    "Invalid response format from HF Space."
+                )
 
-            depth_url = self._extract_artifact_url(hf_result[1])
+            if len(hf_result) < 6:
+                raise ValueError(
+                    f"HF DepthWizard returned {len(hf_result)} outputs; "
+                    "6 outputs are required."
+                )
 
-            depth_dest = os.path.join(tmpdir, "depth.npy")
-            if not self._download_hf_artifact(depth_url, depth_dest):
-                raise ValueError(f"Failed to download Depth artifact from {depth_url}")
+            logger.info(
+                "HF DepthWizard returned %d outputs.",
+                len(hf_result),
+            )
 
-            if not os.path.exists(depth_dest) or os.path.getsize(depth_dest) == 0:
-                raise ValueError(f"Downloaded depth artifact is missing or empty.")
+            # Verified Space contract:
+            # 0 = DSM image
+            # 1 = Relative Depth visualization
+            # 2 = Heightmap image
+            # 3 = OBJ mesh
+            # 4 = Metadata
+            # 5 = Raw Relative Depth .npy
+            raw_depth_source = self._extract_artifact_url(
+                hf_result[5],
+                label="raw depth",
+            )
+
+            depth_dest = os.path.join(
+                tmpdir,
+                "depth.npy",
+            )
+
+            if not self._download_hf_artifact(
+                raw_depth_source,
+                depth_dest,
+                timeout=120.0,
+            ):
+                raise ValueError(
+                    "Failed to download raw DepthWizard .npy artifact."
+                )
+
+            if not os.path.exists(depth_dest):
+                raise ValueError(
+                    "Raw DepthWizard .npy artifact was not created."
+                )
+
+            if os.path.getsize(depth_dest) <= 0:
+                raise ValueError(
+                    "Raw DepthWizard .npy artifact is empty."
+                )
 
             try:
-                depth_arr = np.load(depth_dest, allow_pickle=False).astype(np.float32)
-            except Exception as e:
-                raise ValueError(f"Failed to load depth array: {e}")
+                depth_arr = np.load(
+                    depth_dest,
+                    allow_pickle=False,
+                ).astype(np.float32)
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to load raw depth array: {exc}"
+                )
 
-            if depth_arr.ndim != 2 or depth_arr.size == 0:
-                raise ValueError("Invalid depth array returned from HF.")
-            
+            if depth_arr.ndim != 2:
+                raise ValueError(
+                    f"Raw depth array must be 2D; received {depth_arr.shape}."
+                )
+
+            if depth_arr.size == 0:
+                raise ValueError(
+                    "Raw depth array is empty."
+                )
+
+            if not np.any(np.isfinite(depth_arr)):
+                raise ValueError(
+                    "Raw depth array contains no finite values."
+                )
+
             return depth_arr
 
     def analyze_custom_pair(
@@ -350,9 +438,26 @@ class TemporalChangeEngine:
 
         # 1. Reconstruct Before
         if before_depth_array_path and os.path.exists(before_depth_array_path):
-            before_depth = np.load(before_depth_array_path, allow_pickle=False).astype(np.float32)
+            try:
+                before_depth = np.load(
+                    before_depth_array_path,
+                    allow_pickle=False,
+                ).astype(np.float32)
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to load baseline depth array: {exc}"
+                )
+
+            if before_depth.ndim != 2 or before_depth.size == 0:
+                raise ValueError(
+                    f"Baseline depth array is invalid: {before_depth.shape}"
+                )
+
             before_result = {
-                "depth_map": "", "dsm": "", "mesh": "", "heuristic_indicators": []
+                "depth_map": "",
+                "dsm": "",
+                "mesh": "",
+                "heuristic_indicators": [],
             }
         elif before_bytes:
             before_depth = self._infer_depth_hf(before_bytes, f"before_{req_id}.png")
